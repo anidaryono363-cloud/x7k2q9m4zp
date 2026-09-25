@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>个股盯盘 · 发版</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;padding:16px 16px 48px;font:16px/1.65 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;background:#0d1117;color:#e6edf3;max-width:640px;margin:0 auto}
+h1{font-size:21px;margin:10px 0 4px}
+.sub{color:#8b949e;font-size:13px;margin-bottom:16px}
+.card{background:#161b22;border:1px solid #30363d;border-radius:14px;padding:16px;margin-bottom:14px}
+label{display:block;font-size:14px;color:#8b949e;margin:0 0 7px}
+input[type=text],input[type=password],textarea{width:100%;padding:13px;font-size:16px;border-radius:10px;border:1px solid #30363d;background:#0d1117;color:#e6edf3;font-family:inherit}
+textarea{min-height:86px;resize:vertical}
+input[type=file]{width:100%;padding:12px 0;font-size:15px;color:#8b949e}
+button{width:100%;padding:17px;font-size:17px;font-weight:600;border:0;border-radius:12px;background:#238636;color:#fff;margin-top:8px;font-family:inherit}
+button.gray{background:#21262d;color:#c9d1d9}
+button:disabled{background:#21262d;color:#6e7681}
+#log{white-space:pre-wrap;font:13px/1.55 ui-monospace,Consolas,monospace;background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:12px;margin-top:14px;min-height:64px;color:#c9d1d9}
+.ok{color:#3fb950}.err{color:#f85149}.warn{color:#d29922}
+.pill{display:inline-block;padding:3px 9px;border-radius:999px;font-size:12px;background:#21262d;color:#8b949e;word-break:break-all}
+</style>
+</head>
+<body>
+
+<h1>个股盯盘 · 发版</h1>
+<div class="sub">选 APK → 版本号自动填好 → 点发布。手机上就能发，不用开电脑。</div>
+
+<div class="card" id="tokenCard">
+  <label>GitHub Token（只填一次，之后自动记住）</label>
+  <input type="password" id="tok" placeholder="gho_... 或 ghp_..." autocomplete="off">
+  <button class="gray" id="saveTok">保存</button>
+</div>
+
+<div class="card">
+  <label>APK 文件（文件名必须带「分享版」）</label>
+  <input type="file" id="apk" accept=".apk,application/vnd.android.package-archive">
+  <div id="apkInfo" class="sub" style="margin:10px 0 0"></div>
+
+  <label style="margin-top:16px">版本号</label>
+  <input type="text" id="ver" placeholder="8.1.4" inputmode="decimal" autocomplete="off">
+
+  <label style="margin-top:16px">更新说明（可留空）</label>
+  <textarea id="note" placeholder="本次更新说明"></textarea>
+
+  <button id="go" disabled>发布到 GitHub</button>
+  <div id="log"></div>
+</div>
+
+<div class="sub" style="text-align:center">
+  仓库 github.com/anidaryono363-cloud/x7k2q9m4zp
+</div>
+
+<script>
+const OWNER="anidaryono363-cloud", REPO="x7k2q9m4zp";
+const API="https://api.github.com", UPLOAD="https://uploads.github.com";
+const SHARE_PKG="com.gexing.stockwatch2", ADMIN_PKG="com.gexing.stockwatch";
+
+const $=id=>document.getElementById(id), logEl=$("log");
+function log(m,c){const d=document.createElement("div");if(c)d.className=c;d.textContent=m;logEl.appendChild(d);logEl.scrollTop=logEl.scrollHeight;}
+function clearLog(){logEl.innerHTML="";}
+
+/* ---------- Token ---------- */
+let token=localStorage.getItem("gh_token")||"";
+if(token){$("tokenCard").style.display="none";}
+$("saveTok").onclick=()=>{
+  const v=$("tok").value.trim();
+  if(!v){log("请粘贴 Token","warn");return;}
+  token=v;localStorage.setItem("gh_token",v);
+  $("tokenCard").style.display="none";clearLog();log("Token 已记住","ok");
+};
+
+/* ---------- 选 APK ---------- */
+let apkFile=null;
+$("apk").onchange=async e=>{
+  apkFile=e.target.files[0]||null;clearLog();$("go").disabled=true;
+  if(!apkFile){$("apkInfo").textContent="";return;}
+  $("apkInfo").innerHTML='<span class="pill">'+apkFile.name+'</span> '+(apkFile.size/1048576).toFixed(2)+' MB';
+  const m=apkFile.name.match(/v?(\d+\.\d+(?:\.\d+)*)/);
+  if(m)$("ver").value=m[1];
+
+  if(apkFile.name.indexOf("管理员")>=0){log("❌ 文件名含「管理员」——这是管理员版，内嵌邮箱授权码与 API Key，绝对不能上传！","err");return;}
+  if(apkFile.name.indexOf("分享版")<0){log("❌ 文件名不含「分享版」。为避免误传管理员版，只允许分享版。","err");return;}
+  log("✓ 文件名检查通过","ok");
+
+  try{
+    log("正在读 APK 内部包名…");
+    const pkg=await readApkPackage(apkFile);
+    if(pkg===ADMIN_PKG){log("❌ 真实包名是 "+pkg+" —— 这是【管理员版】，已阻止上传！","err");return;}
+    if(pkg!==SHARE_PKG){log('❌ 真实包名是 "'+pkg+'"，期望 '+SHARE_PKG+"。已阻止。","err");return;}
+    log("✓ 包名检查通过："+pkg+"（分享版）","ok");
+    log("可以发布了","ok");
+    $("go").disabled=false;
+  }catch(err){
+    log("⚠️ 包名检查失败："+err.message,"warn");
+    log("为安全起见已阻止上传。请确认这个 APK 的来源。","warn");
+  }
+};
+
+/* ---------- 读 APK 包名（原生解析 zip + AXML） ---------- */
+async function readApkPackage(file){
+  const buf=new Uint8Array(await file.arrayBuffer());
+  const dv=new DataView(buf.buffer);
+  let eocd=-1;
+  for(let i=buf.length-22;i>=Math.max(0,buf.length-22-65536);i--){
+    if(dv.getUint32(i,true)===0x06054b50){eocd=i;break;}
+  }
+  if(eocd<0)throw new Error("不是有效的 ZIP/APK");
+  const count=dv.getUint16(eocd+10,true);
+  let cd=dv.getUint32(eocd+16,true);
+  const dec=new TextDecoder("utf-8");
+  let mf=null;
+  for(let i=0;i<count;i++){
+    if(dv.getUint32(cd,true)!==0x02014b50)break;
+    const method=dv.getUint16(cd+10,true),compSz=dv.getUint32(cd+20,true);
+    const fnLen=dv.getUint16(cd+28,true),exLen=dv.getUint16(cd+30,true),cmLen=dv.getUint16(cd+32,true);
+    const lho=dv.getUint32(cd+42,true);
+    const name=dec.decode(buf.subarray(cd+46,cd+46+fnLen));
+    if(name==="AndroidManifest.xml"){
+      const lfn=dv.getUint16(lho+26,true),lex=dv.getUint16(lho+28,true);
+      const st=lho+30+lfn+lex,raw=buf.subarray(st,st+compSz);
+      mf=(method===0)?raw:await inflateRaw(raw);
+      break;
+    }
+    cd+=46+fnLen+exLen+cmLen;
+  }
+  if(!mf)throw new Error("APK 里没找到 AndroidManifest.xml");
+  return axmlPackage(mf);
+}
+async function inflateRaw(bytes){
+  if(typeof DecompressionStream==="undefined")throw new Error("这个浏览器太老，不支持解压");
+  const ds=new DecompressionStream("deflate-raw");
+  const stream=new Blob([bytes]).stream().pipeThrough(ds);
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+function axmlPackage(buf){
+  const dv=new DataView(buf.buffer,buf.byteOffset,buf.byteLength);
+  if(dv.getUint16(0,true)!==0x0003)throw new Error("不是二进制 AXML");
+  const off=dv.getUint16(2,true);
+  if(dv.getUint16(off,true)!==0x0001)throw new Error("字符串池异常");
+  const ch=dv.getUint16(off+2,true),sc=dv.getUint32(off+8,true);
+  const flags=dv.getUint32(off+16,true),ss=dv.getUint32(off+20,true);
+  const isUtf8=(flags&(1<<8))!==0;
+  const d8=new TextDecoder("utf-8"),d16=new TextDecoder("utf-16le"),str=[];
+  for(let i=0;i<sc;i++){
+    let p=off+ss+dv.getUint32(off+ch+i*4,true);
+    try{
+      if(isUtf8){
+        let a=buf[p++];if(a&0x80)a=((a&0x7f)<<8)|buf[p++];
+        let b=buf[p++];if(b&0x80)b=((b&0x7f)<<8)|buf[p++];
+        str.push(d8.decode(buf.subarray(p,p+b)));
+      }else{
+        let n=dv.getUint16(p,true);p+=2;
+        if(n&0x8000){n=((n&0x7fff)<<16)|dv.getUint16(p,true);p+=2;}
+        str.push(d16.decode(buf.subarray(p,p+n*2)));
+      }
+    }catch(e){str.push("");}
+  }
+  let o=off+dv.getUint32(off+4,true);
+  while(o+8<=buf.length){
+    const t=dv.getUint16(o,true),sz=dv.getUint32(o+4,true);
+    if(sz<8||o+sz>buf.length)break;
+    if(t===0x0102){
+      const as=dv.getUint16(o+24,true),ac=dv.getUint16(o+28,true);
+      let ap=o+16+as;
+      for(let i=0;i<ac;i++){
+        const ni=dv.getUint32(ap+4,true),rv=dv.getUint32(ap+8,true);
+        const dt=buf[ap+15],dvv=dv.getUint32(ap+16,true);
+        if(str[ni]==="package"){
+          return (rv!==0xffffffff&&str[rv]!==undefined)?str[rv]:(dt===0x03?str[dvv]:String(dvv));
+        }
+        ap+=20;
+      }
+    }
+    o+=sz;
+  }
+  throw new Error("没读到 package 属性");
+}
+
+/* ---------- 发布 ---------- */
+$("go").onclick=async()=>{
+  if(!token){log("请先保存 Token","err");return;}
+  if(!apkFile){log("请先选 APK","err");return;}
+  const ver=$("ver").value.trim().replace(/^[vV]/,"");
+  if(!/^\d+(\.\d+){1,3}$/.test(ver)){log("版本号格式不对，应该像 8.1.4","err");return;}
+  const tag="v"+ver, note=$("note").value.trim()||"本次更新";
+  $("go").disabled=true;clearLog();
+  const H={Authorization:"Bearer "+token,Accept:"application/vnd.github+json","X-GitHub-Api-Version":"2022-11-28"};
+  try{
+    log("① 检查版本是否已存在…");
+    let r=await fetch(API+"/repos/"+OWNER+"/"+REPO+"/releases/tags/"+tag,{headers:H});
+    if(r.ok){log("❌ "+tag+" 已经发布过。要重发请先在网页上删掉旧 Release。","err");$("go").disabled=false;return;}
+    log("  这个版本还没发过");
+
+    log("② 创建 Release 与 tag…");
+    r=await fetch(API+"/repos/"+OWNER+"/"+REPO+"/releases",{
+      method:"POST",headers:Object.assign({},H,{"Content-Type":"application/json"}),
+      body:JSON.stringify({tag_name:tag,name:tag,body:note,draft:false,prerelease:false})
+    });
+    if(!r.ok)throw new Error("创建 Release 失败 "+r.status+"："+(await r.text()).slice(0,180));
+    const rel=await r.json();
+    log("  "+tag+" 已创建","ok");
+
+    log("③ 上传 APK（"+(apkFile.size/1048576).toFixed(2)+" MB）…");
+    const an="stockwatch-"+tag+".apk";
+    r=await fetch(UPLOAD+"/repos/"+OWNER+"/"+REPO+"/releases/"+rel.id+"/assets?name="+encodeURIComponent(an),{
+      method:"POST",
+      headers:{Authorization:"Bearer "+token,"Content-Type":"application/vnd.android.package-archive"},
+      body:apkFile
+    });
+    if(!r.ok)throw new Error("上传失败 "+r.status+"："+(await r.text()).slice(0,180));
+    const a=await r.json();
+    log("  上传完成："+a.name+"（"+(a.size/1048576).toFixed(2)+" MB）","ok");
+    log("");
+    log("🎉 发版完成！","ok");
+    log("用户打开 App 就会自动检测到新版本");
+    log("更新地址：github.com/"+OWNER+"/"+REPO,"ok");
+  }catch(err){
+    log("❌ "+err.message,"err");
+    log("（若已创建了 Release 但上传失败，可在网页上手动补传）","warn");
+  }
+  $("go").disabled=false;
+};
+</script>
+</body>
+</html>
